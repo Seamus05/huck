@@ -1,0 +1,11 @@
+[Unit]
+Description=Huck drift check — runs test suite, checks README tree, queries for unresolved work, wakes Huck on drift
+
+[Service]
+Type=oneshot
+ExecStart=/home/theyokel/huck/config/huck-check-wrapper.sh
+WorkingDirectory=/home/theyokel/huck
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=huck-check
+SuccessExitStatus=0 1

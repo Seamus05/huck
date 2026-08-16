@@ -2,3 +2,4 @@ state/
 .env
 *.pyc
 __pycache__/
+.opencode/

@@ -2,16 +2,25 @@
 
 Proving agent for the isolated-agent pattern (A → B → C).
 
-Huck is born in a VM with a minimal seed: a name, a purpose, and `ds.chronicle()`.
-Everything else is discovered.
+Huck is born in a VM with a seed: an identity, operating principles, a
+self-sustaining work cycle, and `ds.py` (chronicle and query helpers for
+Mnemosyne). A systemd timer wakes Huck every 15 minutes to scan for drift
+and unresolved work. When it finds something, the fix→harden→generalise
+cycle begins. When it doesn't, Huck stays awake and waits.
 
 ## Layout
 
 ```
 huck/
-├── persona.md          # minimal seed — who Huck is
+├── .gitignore
+├── persona.md          # identity + operating model + self-management
+├── config/
+│   ├── huck-check.service   # systemd service for drift scanner
+│   └── huck-check.timer     # 15-minute wake interval
 ├── notebooks/
-│   └── ds.py           # chronicle helper for Mnemosyne
+│   ├── ds.py           # chronicle() + query() helpers for Mnemosyne
+│   ├── check.py        # drift scanner — tests, tree, unresolved items
+│   └── test_ds.py      # unit tests for ds.py
 ├── state/              # runtime state (git-ignored)
 └── README.md
 ```

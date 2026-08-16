@@ -1,0 +1,10 @@
+[Unit]
+Description=Huck drift check timer — wakes every 15 minutes to scan for drift and unresolved work
+
+[Timer]
+OnBootSec=30s
+OnUnitActiveSec=15min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
