@@ -9,3 +9,4 @@ StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=huck-check
 SuccessExitStatus=0 1
+KillMode=process

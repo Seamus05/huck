@@ -96,6 +96,86 @@ def query(
         return []
 
 
+def learn(
+    query_text: str,
+    limit: int = 20,
+    min_q: float = 0.0,
+    agents: Optional[list[str]] = None,
+    top_tags: int = 10,
+    archive_id: str = DEFAULT_ARCHIVE,
+) -> dict:
+    """Query the whole shared corpus and extract recurring patterns.
+
+    Unlike query(), which returns raw passages for one narrow question,
+    learn() looks sideways: it pulls a broader slice of the shared archive
+    and aggregates the signals a single passage hides — which agents have
+    chronicled on a theme, and which tags recur across them. This is the
+    cross-agent bridge: what Phaedrus, Carlin, Jung, and the rest noticed
+    that Huck hasn't yet.
+
+    Args:
+        query_text: theme to mine.
+        limit: how many passages to examine (wider = more signal, more noise).
+        min_q: similarity floor; default 0.0 to gather a broad sample.
+        agents: optional list of agent ids (e.g. ['phaedrus', 'kairos']) to
+            restrict to. None means the whole corpus.
+        top_tags: how many most-common tags to return.
+        archive_id: which archive to read from.
+
+    Returns:
+        dict with:
+            count       — passages examined
+            agents      — distinct agent ids observed (from agent:* tags)
+            top_tags    — most frequent tags across the slice
+            passages    — trimmed raw passages (id, text, tags)
+    """
+    if not query_text or not query_text.strip():
+        return {"count": 0, "agents": [], "top_tags": [], "passages": []}
+    if top_tags < 1:
+        top_tags = 10
+
+    passages = query(
+        query_text,
+        limit=limit,
+        min_q=min_q,
+        archive_id=archive_id,
+        order_by="similarity",
+    )
+
+    # Restrict to a subset of agents if asked.
+    if agents:
+        allowed = {f"agent:{a}".lower() for a in agents}
+        passages = [
+            p for p in passages
+            if any(t in allowed for t in (p.get("tags") or []))
+        ]
+
+    from collections import Counter
+
+    seen_agents: set[str] = set()
+    tag_counts: Counter = Counter()
+
+    for p in passages:
+        for t in p.get("tags") or []:
+            if t.startswith("agent:"):
+                seen_agents.add(t.split(":", 1)[1])
+            else:
+                tag_counts[t] += 1
+
+    # Return a trimmed view of the raw passages too, so a caller can read on.
+    trimmed = [
+        {"id": p.get("id", ""), "text": (p.get("text") or "")[:200], "tags": p.get("tags", [])}
+        for p in passages
+    ]
+
+    return {
+        "count": len(passages),
+        "agents": sorted(seen_agents),
+        "top_tags": [t for t, _ in tag_counts.most_common(top_tags)],
+        "passages": trimmed,
+    }
+
+
 def exists(source_file: str) -> list[dict]:
     """Check if passages already exist for a given source_file metadata key."""
     encoded = urllib.parse.quote(source_file)

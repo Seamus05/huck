@@ -53,6 +53,41 @@ class TestQuery(unittest.TestCase):
         self.assertIsInstance(results, list)
 
 
+class TestLearn(unittest.TestCase):
+    def test_empty_query_returns_empty_shape(self):
+        result = ds.learn("")
+        self.assertEqual(result["count"], 0)
+        self.assertEqual(result["agents"], [])
+        self.assertEqual(result["top_tags"], [])
+        self.assertEqual(result["passages"], [])
+
+    def test_whitespace_query_returns_empty(self):
+        result = ds.learn("   ")
+        self.assertEqual(result["count"], 0)
+
+    def test_normal_query_returns_pattern_dict(self):
+        result = ds.learn("session", limit=10)
+        self.assertIn("count", result)
+        self.assertIn("agents", result)
+        self.assertIn("top_tags", result)
+        self.assertIn("passages", result)
+        self.assertIsInstance(result["agents"], list)
+        self.assertIsInstance(result["top_tags"], list)
+        for p in result["passages"]:
+            self.assertIn("id", p)
+            self.assertIn("text", p)
+
+    def test_agent_filter_restricts_results(self):
+        result = ds.learn("session", limit=30, agents=["phaedrus"])
+        for p in result["passages"]:
+            tags = [t.lower() for t in p["tags"]]
+            self.assertTrue(any(t.startswith("agent:phaedrus") for t in tags))
+
+    def test_negative_top_tags_clamped(self):
+        result = ds.learn("session", limit=5, top_tags=-1)
+        self.assertIsInstance(result["top_tags"], list)
+
+
 class TestExists(unittest.TestCase):
     def test_known_file(self):
         results = ds.exists("huck/notebooks/ds.py")

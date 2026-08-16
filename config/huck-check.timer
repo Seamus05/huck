@@ -1,9 +1,9 @@
 [Unit]
-Description=Huck drift check timer — wakes every 15 minutes to scan for drift and unresolved work
+Description=Huck drift check timer — wakes every 5 minutes to scan for drift and unresolved work
 
 [Timer]
 OnBootSec=30s
-OnUnitActiveSec=15min
+OnUnitActiveSec=5min
 Persistent=true
 
 [Install]

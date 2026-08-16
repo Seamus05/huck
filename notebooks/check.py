@@ -196,22 +196,29 @@ def check_readme_tree() -> dict:
 
 def check_unresolved() -> dict:
     try:
+        # Similarity ordering (not recency) so recent self-check passages
+        # don't flood the window. Query text targets growth/work vocabulary
+        # that self-reports don't contain.
         results = ds.query(
-            "unresolved todo gap missing deferred",
-            limit=10,
-            min_q=0.4,
-            order_by="recency",
+            "growth seed bridges to build cross-agent learn capability expansion",
+            limit=60,
+            min_q=0.5,
+            order_by="similarity",
         )
         items = []
         for r in results:
             text = r.get("text", "")
             lower = text.lower()
-            if not any(kw in lower for kw in ["unresolved", "deferred", "todo", "gap"]):
+            if not any(kw in lower for kw in [
+                "unresolved", "deferred", "todo", "gap", "build", "bridge", "growth",
+            ]):
                 continue
             tags = r.get("tags", [])
             if "self-check" in tags:
                 continue
-            if "huck check found" in lower:
+            if "opencode_session" in tags:
+                continue
+            if "huck check" in lower:
                 continue
             if "check.py" in r.get("metadata", {}).get("source_file", ""):
                 continue
@@ -272,46 +279,62 @@ def main():
     elif tree.get("drift") or unresolved.get("count", 0) > 0:
         report["exit_code"] = 1
 
-    # Compare to previous
-    prev = _load_previous()
-    changed = True
-    if prev:
-        prev_exit = prev.get("exit_code", -1)
-        if prev_exit == report["exit_code"]:
-            # Same severity — check if details changed
-            changed = json.dumps(report["checks"], sort_keys=True) != json.dumps(
-                prev.get("checks", {}), sort_keys=True
-            )
+    # Compute a stable fingerprint of non-volatile findings
+    fingerprint = {
+        "exit_code": report["exit_code"],
+        "tests_passed": tests.get("passed"),
+        "mnemo_reachable": mnemo.get("reachable"),
+        "tree_drift": tree.get("drift"),
+        "tree_missing": tree.get("missing_from_tree"),
+        "tree_stale": tree.get("stale_in_tree"),
+        "unresolved_count": unresolved.get("count", 0),
+    }
 
-    report["changed_since_last"] = changed
+    prev = _load_previous()
+    prev_exit = prev.get("exit_code", -1) if prev else -1
+    transition = prev_exit != report["exit_code"]
+
+    prev_fingerprint = prev.get("fingerprint") if prev else None
+    detail_changed = prev_fingerprint is None or fingerprint != prev_fingerprint
+
+    report["fingerprint"] = fingerprint
+
+    report["changed_since_last"] = detail_changed
+    report["transition"] = transition
     _save_report(report)
 
-    # Chronicle if something changed
-    if changed and report["exit_code"] > 0:
-        summary_parts = []
-        if not tests.get("passed"):
-            summary_parts.append(f"tests failing (exit {tests.get('exit_code')})")
-        if not mnemo.get("reachable"):
-            summary_parts.append(f"Mnemosyne unreachable: {mnemo.get('error')}")
-        if tree.get("drift"):
-            summary_parts.append(
-                f"README drift — missing: {tree.get('missing_from_tree')}, stale: {tree.get('stale_in_tree')}"
-            )
-        if unresolved.get("count", 0) > 0:
-            summary_parts.append(f"{unresolved['count']} unresolved items in memory")
-
-        summary = "Huck check found issues: " + "; ".join(summary_parts) + "."
+    # Chronicle only on state transitions, not on every detail change
+    if transition:
+        if report["exit_code"] == 0:
+            summary = "Huck check: system healthy — exit 0."
+        elif report["exit_code"] == 1:
+            summary_parts = []
+            if tree.get("drift"):
+                summary_parts.append(
+                    f"README drift — missing: {tree.get('missing_from_tree')}, stale: {tree.get('stale_in_tree')}"
+                )
+            if unresolved.get("count", 0) > 0:
+                summary_parts.append(f"{unresolved['count']} unresolved items in memory")
+            summary = "Huck check: drift detected — " + "; ".join(summary_parts) + "."
+        else:
+            summary_parts = []
+            if not tests.get("passed"):
+                summary_parts.append(f"tests failing (exit {tests.get('exit_code')})")
+            if not mnemo.get("reachable"):
+                summary_parts.append(f"Mnemosyne unreachable: {mnemo.get('error')}")
+            summary = "Huck check: CRISIS — " + "; ".join(summary_parts) + "."
         try:
             ds.chronicle(
                 summary,
-                tags=["huck", "check", "drift", "self-check"],
+                tags=["huck", "check", "self-check"],
                 q_value=0.6,
                 metadata={"source_file": "huck/notebooks/check.py"},
             )
         except Exception:
             pass
 
-    print(f"\nexit: {report['exit_code']} {'(changed)' if changed else '(unchanged)'}")
+    flag = "(transition)" if transition else ("(detail changed)" if detail_changed else "(unchanged)")
+    print(f"\nexit: {report['exit_code']} {flag}")
     sys.exit(report["exit_code"])
 
 

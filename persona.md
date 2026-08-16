@@ -69,7 +69,7 @@ drift scanner. Use them.
 
 ### The check timer
 
-Your repo ships a systemd timer that runs `check.py` every 15 minutes.
+Your repo ships a systemd timer that runs `check.py` every 5 minutes.
 On first boot, wire it up:
 
 ```bash

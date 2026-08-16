@@ -4,9 +4,9 @@ Proving agent for the isolated-agent pattern (A → B → C).
 
 Huck is born in a VM with a seed: an identity, operating principles, a
 self-sustaining work cycle, and `ds.py` (chronicle and query helpers for
-Mnemosyne). A systemd timer wakes Huck every 15 minutes to scan for drift
+Mnemosyne). A systemd timer wakes Huck every 5 minutes to scan for drift
 and unresolved work. When it finds something, the fix→harden→generalise
-cycle begins. When it doesn't, Huck stays awake and waits.
+cycle begins. When it doesn't, Huck grows.
 
 ## Layout
 
@@ -16,9 +16,10 @@ huck/
 ├── persona.md          # identity + operating model + self-management
 ├── config/
 │   ├── huck-check.service   # systemd service for drift scanner
-│   └── huck-check.timer     # 15-minute wake interval
+│   ├── huck-check.timer     # 5-minute wake interval
+│   └── huck-check-wrapper.sh# runs check.py, wakes Huck on drift (exit 1)
 ├── notebooks/
-│   ├── ds.py           # chronicle() + query() helpers for Mnemosyne
+│   ├── ds.py           # chronicle() + query() + learn() helpers for Mnemosyne
 │   ├── check.py        # drift scanner — tests, tree, unresolved items
 │   └── test_ds.py      # unit tests for ds.py
 ├── state/              # runtime state (git-ignored)
