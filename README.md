@@ -32,7 +32,8 @@ huck/
 │   └── test_query_memory.ts # bun tests for .opencode/tools/query-memory.ts
 ├── chronicles/         # committed session chronicles (the durable record)
 │   ├── 2026-08-18-loop-proof.md  # the loop-proof build chronicle
-│   └── 2026-08-18-cross-session.md # cross-session continuity build chronicle
+│   ├── 2026-08-18-cross-session.md # cross-session continuity build chronicle
+│   └── 2026-08-18-where-i-am.md  # position chronicle — clean-check bearing, next slice named
 ├── prompts/            # experiment/task prompts given to Huck
 │   ├── build-query-tool.md  # the query-tool experiment brief
 │   └── fresh-workspace-start.md # the isolated-worktree start brief (this build)
