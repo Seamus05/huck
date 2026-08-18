@@ -3,9 +3,12 @@ state/
 *.pyc
 __pycache__/
 
-# .opencode/ contains node_modules + opencode.json — keep those out of git,
-# but the custom tools in .opencode/tools/ ARE part of the repo (Huck built
-# query-memory.ts there; it must survive clones).
+# .opencode/ contains node_modules + local machine config — keep those out of
+# git, but the custom tools in .opencode/tools/ AND the committed agent
+# definition .opencode/opencode.json ARE part of the repo (the isolated-agent
+# pattern requires the seed to carry its own identity: a fresh checkout must
+# be able to instantiate Huck without ambient global config).
 .opencode/*
 !.opencode/tools/
 !.opencode/tools/**
+!.opencode/opencode.json

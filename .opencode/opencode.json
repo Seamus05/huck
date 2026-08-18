@@ -1,0 +1,23 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "model": "opencode/deepseek-v4-flash-free",
+  "small_model": "opencode/deepseek-v4-flash-free",
+  "agent": {
+    "huck": {
+      "description": "Proving agent — isolated VM, discovers environment, chronicles findings. The isolated-agent-pattern proof (Seamus05/Lab#1 Track B): one agent demonstrably working end-to-end, independent.",
+      "model": "opencode/deepseek-v4-flash-free",
+      "hidden": false,
+      "permission": {
+        "read": "allow",
+        "glob": "allow",
+        "grep": "allow",
+        "bash": "allow",
+        "edit": "allow",
+        "write": "allow",
+        "webfetch": "allow",
+        "task": "deny",
+        "todowrite": "allow"
+      }
+    }
+  }
+}

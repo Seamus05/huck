@@ -70,10 +70,13 @@ COMPLETION_TEXT_MARKERS = (
 )
 
 # Past-tense openings: "Created X and integrated Y" is a record, not a seed.
-# Deliberately excludes "built"/"build" — "Build X" is how a seed talks.
+# "Build X" (imperative) is how a seed talks — but "Built X" (past tense) is
+# a completion record: "Built the learn() cross-agent bridge" is work done,
+# not work to do. The two are distinguishable by the trailing 't', so "built "
+# belongs in the openers while "build " stays out.
 COMPLETION_OPENERS = (
     "created ", "wrote ", "implemented ", "updated ",
-    "integrated ", "moved ", "added ",
+    "integrated ", "moved ", "added ", "built ",
 )
 
 
@@ -151,6 +154,37 @@ def check_mnemosyne() -> dict:
     if health.get("error"):
         result["error"] = health["error"]
     return result
+
+
+def check_agent_config() -> dict:
+    """Verify the repo can instantiate its own agent (isolated-agent seed).
+
+    The isolated-agent pattern's claim is that a fresh checkout IS the agent
+    seed — it must carry its own identity, not depend on ambient global
+    config. So .opencode/opencode.json (the huck agent definition: model,
+    permissions, description) is committed to the repo, and this check fails
+    if it goes missing or stops defining huck.
+
+    Deliberately loose about model strings: the model name may legitimately
+    differ per host. What must NOT differ is the agent's existence.
+    """
+    try:
+        with open(os.path.join(REPO_ROOT, ".opencode", "opencode.json")) as f:
+            data = json.load(f)
+    except FileNotFoundError:
+        return {
+            "ok": False,
+            "error": ".opencode/opencode.json missing — the repo no longer carries its agent definition",
+        }
+    except json.JSONDecodeError as e:
+        return {"ok": False, "error": f".opencode/opencode.json not valid JSON: {e}"}
+
+    agent = (data.get("agent") or {}).get("huck")
+    if not isinstance(agent, dict):
+        return {"ok": False, "error": "no agent.huck definition in .opencode/opencode.json"}
+    if "description" not in agent or "permission" not in agent:
+        return {"ok": False, "error": "agent.huck must define description and permission"}
+    return {"ok": True}
 
 
 def check_readme_tree() -> dict:
@@ -298,7 +332,7 @@ def _is_unresolved(r: dict, resolved: set) -> bool:
         return False
     if "huck check" in lower:
         return False
-    if "check.py" in r.get("metadata", {}).get("source_file", ""):
+    if "check.py" in ds.passage_metadata(r).get("source_file", ""):
         return False
     meta_tags = {"documentation", "infrastructure", "persona", "readme", "test", "quality", "configuration"}
     if meta_tags & tags:
@@ -489,6 +523,15 @@ def main():
     else:
         print("  clean")
 
+    # 3b. Agent seed — the repo must carry its own agent definition
+    print("─ agent config ─")
+    agent_cfg = check_agent_config()
+    report["checks"]["agent_config"] = agent_cfg
+    if agent_cfg.get("ok"):
+        print("  ok — .opencode/opencode.json defines agent.huck")
+    else:
+        print(f"  DRIFT — {agent_cfg.get('error', 'unknown')}")
+
     # 4. Unresolved items
     print("─ unresolved ─")
     unresolved = check_unresolved()
@@ -513,7 +556,8 @@ def main():
     report["exit_code"] = 0
     if not tests.get("passed") or not mnemo.get("reachable"):
         report["exit_code"] = 2
-    elif tree.get("drift") or unresolved.get("count", 0) > 0:
+    elif (tree.get("drift") or agent_cfg.get("ok") is False
+          or unresolved.get("count", 0) > 0):
         report["exit_code"] = 1
 
     # Compute a stable fingerprint of non-volatile findings
@@ -524,6 +568,7 @@ def main():
         "tree_drift": tree.get("drift"),
         "tree_missing": tree.get("missing_from_tree"),
         "tree_stale": tree.get("stale_in_tree"),
+        "agent_config_ok": agent_cfg.get("ok"),
         "unresolved_count": unresolved.get("count", 0),
     }
 
@@ -544,6 +589,7 @@ def main():
         "tests_passed": tests.get("passed"),
         "mnemo_reachable": mnemo.get("reachable"),
         "tree_drift": tree.get("drift"),
+        "agent_config_ok": agent_cfg.get("ok"),
         "unresolved_count": unresolved.get("count", 0),
         "tracker_reachable": tracker.get("reachable", False),
         "tracker_repo": TRACKER_REPO,
@@ -569,6 +615,8 @@ def main():
                 summary_parts.append(
                     f"README drift — missing: {tree.get('missing_from_tree')}, stale: {tree.get('stale_in_tree')}"
                 )
+            if agent_cfg.get("ok") is False:
+                summary_parts.append(f"agent config drift — {agent_cfg.get('error')}")
             if unresolved.get("count", 0) > 0:
                 summary_parts.append(f"{unresolved['count']} unresolved items in memory")
             summary = "Huck check: drift detected — " + "; ".join(summary_parts) + "."

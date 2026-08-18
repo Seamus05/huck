@@ -2,6 +2,7 @@ import unittest
 import sys
 import os
 import json
+import tempfile
 from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -338,6 +339,122 @@ class TestRoundtrip(unittest.TestCase):
         self.assertFalse(ev["ok"])
         self.assertEqual(ev["steps"]["read"], "empty")
         self.assertEqual(ev["results"], 0)
+
+
+class TestResolvedMemoryLedger(unittest.TestCase):
+    """Resolution state lives in shared memory, not just a gitignored file.
+
+    Cross-session continuity (Seamus05/Lab#1 acceptance criterion): a fresh
+    checkout with no local state/ must still know what a prior session
+    resolved, because mark_resolved() chronicles resolution records to
+    Mnemosyne and resolved_ids() reads them back. Tests mock the network.
+    """
+
+    def setUp(self):
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmpdir.cleanup)
+
+    def tearDown(self):
+        pass
+
+    def test_resolved_ids_merges_local_and_memory(self):
+        with mock.patch.object(ds, "_resolved_ids_local", return_value=["local-id-1"]), \
+             mock.patch.object(ds, "_resolved_ids_memory", return_value=["mem-id-1", "local-id-1"]):
+            ids = ds.resolved_ids()
+        self.assertEqual(sorted(ids), ["local-id-1", "mem-id-1"])
+
+    def test_resolved_ids_memory_empty_when_no_records(self):
+        with mock.patch.object(ds, "_resolved_ids_local", return_value=["local-id-1"]), \
+             mock.patch.object(ds, "_resolved_ids_memory", return_value=[]):
+            ids = ds.resolved_ids()
+        self.assertEqual(ids, ["local-id-1"])
+
+    def test_memory_lookup_parses_resolved_id_metadata(self):
+        # exists() returns resolution records keyed by metadata.resolved_id
+        records = [
+            {"metadata": {"source_file": ds.RESOLVED_SOURCE, "resolved_id": "abc123"}},
+            {"metadata": {"source_file": ds.RESOLVED_SOURCE, "resolved_id": "def456"}},
+            {"metadata": {"source_file": "something-else", "resolved_id": "ignored"}},
+        ]
+        with mock.patch.object(ds, "exists", return_value=records):
+            ids = ds._resolved_ids_memory()
+        self.assertEqual(sorted(ids), ["abc123", "def456"])
+
+    def test_memory_lookup_handles_service_metadata_string_shape(self):
+        # The real Mnemosyne service returns metadata as `metadata_` — a JSON
+        # string — not `metadata` dict. Without passage_metadata() the read
+        # path was blind to its own resolution records.
+        records = [
+            {"metadata_": '{"source_file": "huck/state/resolved.json", "resolved_id": "xyz789"}'},
+            {"metadata_": '{"source_file": "huck/state/resolved.json", "resolved_id": "uvw456"}'},
+        ]
+        with mock.patch.object(ds, "exists", return_value=records):
+            ids = ds._resolved_ids_memory()
+        self.assertEqual(sorted(ids), ["uvw456", "xyz789"])
+
+    def test_passage_metadata_normalizes_both_shapes(self):
+        self.assertEqual(
+            ds.passage_metadata({"metadata": {"a": 1}}),
+            {"a": 1},
+        )
+        self.assertEqual(
+            ds.passage_metadata({"metadata_": '{"a": 1}'}),
+            {"a": 1},
+        )
+        self.assertEqual(ds.passage_metadata({}), {})
+        self.assertEqual(ds.passage_metadata({"metadata_": "not json"}), {})
+        self.assertEqual(ds.passage_metadata({"metadata_": ""}), {})
+        self.assertEqual(ds.passage_metadata({"metadata": "not a dict"}), {})
+
+    def test_memory_lookup_graceful_on_error(self):
+        with mock.patch.object(ds, "exists", side_effect=OSError("down")):
+            ids = ds._resolved_ids_memory()
+        self.assertEqual(ids, [])
+
+    def test_mark_resolved_writes_local_and_memory(self):
+        def fake_state_file(name):
+            return os.path.join(self.tmpdir.name, name)
+
+        with mock.patch.object(ds, "_state_file", side_effect=fake_state_file), \
+             mock.patch.object(ds, "_resolved_ids_local", return_value=["old"]), \
+             mock.patch.object(ds, "_write_resolved_memory", return_value=True) as mock_mem:
+            ok = ds.mark_resolved("new-id")
+        self.assertTrue(ok)
+        mock_mem.assert_called_once_with("new-id")
+        # local ledger now contains old + new
+        with open(os.path.join(self.tmpdir.name, "resolved.json")) as f:
+            data = json.load(f)
+        self.assertIn("new-id", data["ids"])
+
+    def test_mark_resolved_returns_true_when_memory_only(self):
+        def fake_state_file(name):
+            return os.path.join(self.tmpdir.name, name)
+
+        with mock.patch.object(ds, "_state_file", side_effect=fake_state_file), \
+             mock.patch.object(ds, "_resolved_ids_local", return_value=[]), \
+             mock.patch.object(ds, "_write_resolved_memory", return_value=True):
+            ok = ds.mark_resolved("mem-only-id")
+        self.assertTrue(ok)
+
+    def test_mark_resolved_dedups_memory_record(self):
+        # If a resolution record already exists in memory, don't write twice.
+        records = [{"metadata": {"source_file": ds.RESOLVED_SOURCE, "resolved_id": "dup-id"}}]
+        with mock.patch.object(ds, "exists", return_value=records), \
+             mock.patch.object(ds, "chronicle") as mock_chronicle:
+            ok = ds._write_resolved_memory("dup-id")
+        self.assertTrue(ok)
+        mock_chronicle.assert_not_called()
+
+    def test_mark_resolved_writes_memory_record_when_absent(self):
+        with mock.patch.object(ds, "exists", return_value=[]), \
+             mock.patch.object(ds, "chronicle", return_value={"id": "new-rec"}) as mock_chronicle:
+            ok = ds._write_resolved_memory("fresh-id")
+        self.assertTrue(ok)
+        mock_chronicle.assert_called_once()
+        _, kwargs = mock_chronicle.call_args
+        self.assertEqual(kwargs["metadata"]["resolved_id"], "fresh-id")
+        self.assertEqual(kwargs["metadata"]["source_file"], ds.RESOLVED_SOURCE)
+        self.assertIn("resolved", kwargs["tags"])
 
 
 if __name__ == "__main__":

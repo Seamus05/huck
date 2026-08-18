@@ -227,6 +227,29 @@ class TestIsUnresolved(unittest.TestCase):
         )
         self.assertFalse(check._is_unresolved(r, set()))
 
+    def test_past_tense_built_completion_not_unresolved(self):
+        # "Built X" (past tense) is a completion record — NOT a seed.
+        # Discovered 2026-08-18 in the b1-memory-loop worktree: the learn()
+        # bridge chronicle started "Built the learn() cross-agent bridge..."
+        # and was flagged as unresolved because "built " was missing from the
+        # past-tense openers. "build " (imperative) must still count as a seed.
+        r = self._p(
+            "Built the learn() cross-agent bridge (growth seed option 2 of 0f2d383c). "
+            "learn(query_text, limit, min_q, agents, top_tags) in ds.py queries "
+            "the whole shared corpus and aggregates recurring patterns.",
+            tags=["huck", "growth", "build", "learn", "bridge", "cross-agent"],
+        )
+        self.assertFalse(check._is_unresolved(r, set()))
+
+    def test_imperative_build_still_unresolved(self):
+        # "Build X" (imperative) is how a seed talks — the "built " opener
+        # must NOT swallow it.
+        r = self._p(
+            "Build a bridge from Huck to the Wayfinder tracker. Can you build it?",
+            tags=["huck", "growth"],
+        )
+        self.assertTrue(check._is_unresolved(r, set()))
+
     def test_seed_with_next_session_tag_is_unresolved(self):
         r = self._p(
             "Growth seed — bridges to build. (1) The Wayfinder episode.",
@@ -271,6 +294,76 @@ class TestIsUnresolved(unittest.TestCase):
             source_file="huck/notebooks/check.py",
         )
         self.assertFalse(check._is_unresolved(r, set()))
+
+    def test_check_py_source_skipped_with_service_metadata_shape(self):
+        # The Mnemosyne service returns metadata as `metadata_` (a JSON
+        # string), not `metadata` (a dict). Discovered 2026-08-18: the
+        # source_file filter was reading the dict shape and had silently
+        # stopped matching real passages.
+        r = {
+            "id": "p1",
+            "text": "build bridge",
+            "tags": [],
+            "metadata_": '{"source_file": "huck/notebooks/check.py"}',
+        }
+        self.assertFalse(check._is_unresolved(r, set()))
+
+
+class TestAgentConfig(unittest.TestCase):
+    """The repo must carry its own agent definition (isolated-agent seed).
+
+    .opencode/opencode.json is committed so a fresh checkout can instantiate
+    Huck without ambient global config. The check fails when the definition
+    goes missing or stops defining agent.huck.
+    """
+
+    def _tmp_repo(self):
+        tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tmpdir.cleanup)
+        old_root = check.REPO_ROOT
+        check.REPO_ROOT = tmpdir.name
+        self.addCleanup(setattr, check, "REPO_ROOT", old_root)
+        return tmpdir.name
+
+    def test_ok_when_config_defines_huck(self):
+        root = self._tmp_repo()
+        os.makedirs(os.path.join(root, ".opencode"))
+        with open(os.path.join(root, ".opencode", "opencode.json"), "w") as f:
+            json.dump({
+                "agent": {
+                    "huck": {
+                        "description": "Proving agent",
+                        "model": "opencode/deepseek-v4-flash-free",
+                        "permission": {"read": "allow"},
+                    }
+                }
+            }, f)
+        result = check.check_agent_config()
+        self.assertTrue(result["ok"])
+
+    def test_fails_when_file_missing(self):
+        self._tmp_repo()
+        result = check.check_agent_config()
+        self.assertFalse(result["ok"])
+        self.assertIn("missing", result["error"])
+
+    def test_fails_when_no_huck_agent(self):
+        root = self._tmp_repo()
+        os.makedirs(os.path.join(root, ".opencode"))
+        with open(os.path.join(root, ".opencode", "opencode.json"), "w") as f:
+            json.dump({"agent": {"phaedrus": {"description": "x"}}}, f)
+        result = check.check_agent_config()
+        self.assertFalse(result["ok"])
+        self.assertIn("agent.huck", result["error"])
+
+    def test_fails_when_invalid_json(self):
+        root = self._tmp_repo()
+        os.makedirs(os.path.join(root, ".opencode"))
+        with open(os.path.join(root, ".opencode", "opencode.json"), "w") as f:
+            f.write("{not json")
+        result = check.check_agent_config()
+        self.assertFalse(result["ok"])
+        self.assertIn("valid JSON", result["error"])
 
 
 if __name__ == "__main__":

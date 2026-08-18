@@ -15,6 +15,7 @@ huck/
 ├── .gitignore
 ├── persona.md          # identity + operating model + self-management
 ├── .opencode/
+│   ├── opencode.json   # committed agent definition — the seed carries its own identity
 │   └── tools/
 │       └── query-memory.ts # Huck's read tool: search shared Mnemosyne memory
 ├── config/
@@ -22,17 +23,19 @@ huck/
 │   ├── huck-check.timer     # 5-minute wake interval
 │   └── huck-check-wrapper.sh# runs check.py, wakes Huck on drift (exit 1)
 ├── notebooks/
-│   ├── ds.py           # chronicle() + query() + learn() + roundtrip() helpers for Mnemosyne
-│   ├── check.py        # drift scanner — tests, tree, unresolved items, tracker, dashboard
+│   ├── ds.py           # chronicle() + query() + learn() + roundtrip() + resolved-ledger helpers
+│   ├── check.py        # drift scanner — tests, tree, agent seed, unresolved, tracker, dashboard
 │   ├── verify_loop.py  # loop proof CLI — write → read → match, saves state/loop-proof.json
 │   ├── test_ds.py      # unit tests for ds.py
 │   ├── test_check.py   # unit tests for check.py dashboard + tracker + unresolved filter
 │   ├── test_verify_loop.py # unit tests for verify_loop.py
 │   └── test_query_memory.ts # bun tests for .opencode/tools/query-memory.ts
 ├── chronicles/         # committed session chronicles (the durable record)
-│   └── 2026-08-18-loop-proof.md # the loop-proof build chronicle
+│   ├── 2026-08-18-loop-proof.md  # the loop-proof build chronicle
+│   └── 2026-08-18-cross-session.md # cross-session continuity build chronicle
 ├── prompts/            # experiment/task prompts given to Huck
-│   └── build-query-tool.md  # the query-tool experiment brief (this build)
+│   ├── build-query-tool.md  # the query-tool experiment brief
+│   └── fresh-workspace-start.md # the isolated-worktree start brief (this build)
 ├── state/              # runtime state (git-ignored): check.json, health.json, dashboard.md
 └── README.md
 ```
@@ -92,3 +95,49 @@ This addresses the tracker's open question — acceptance criteria for
 "proving the pattern" — at the memory layer: end-to-end independence means
 the agent can verify its own loop and produce evidence, no orchestrator
 required.
+
+## Cross-session continuity — resolution state travels with the agent
+
+The next acceptance criterion, proved from a fresh isolated worktree
+(branch `b1-memory-loop`, 2026-08-18): a new checkout must reach the same
+"what's done" conclusion as the checkout that did the work. Before this
+build, `state/resolved.json` was the only resolution ledger — gitignored,
+so a fresh checkout forgot everything. The worktree's own check exposed it
+live: 2 items that the main checkout had already resolved were flagged as
+unresolved.
+
+Two layers of fix:
+
+1. **The resolution ledger lives in shared memory too.** `mark_resolved()`
+   chronicles a resolution record to Mnemosyne (metadata keyed by
+   `huck/state/resolved.json` + `resolved_id`); `resolved_ids()` merges the
+   local file with the memory ledger. A fresh checkout with no `state/` dir
+   still knows what prior sessions resolved — knowledge crosses checkout
+   boundaries through the same Mnemosyne layer the loop proof verifies.
+   Falsifiable pass condition: fresh checkout, no local state → `check.py`
+   reports the same resolved set as the originating checkout.
+2. **`built ` is a past-tense completion opener.** The drift filter
+   recognised "Created X", "Implemented Y" as records of work done — but
+   deliberately excluded "built ", so "Built the learn() bridge" (a
+   completion chronicle) was misread as a seed. "build " (imperative) is a
+   seed; "built " (past) is a record. The trailing 't' distinguishes them.
+
+Also hardened along the way:
+
+- **`ds.passage_metadata()`** — the Mnemosyne service returns metadata as
+  `metadata_` (a JSON string), not `metadata` (a dict). The read path was
+  blind to its own resolution records, and check.py's `source_file` filter
+  had silently stopped matching real passages. One normalizer fixes both.
+- **`check_agent_config()`** — the repo's committed `.opencode/opencode.json`
+  must still define `agent.huck`, or the check flags drift. The agent
+  definition travels with the repo because the seed must be able to
+  instantiate itself: an agent that needs ambient global config to exist
+  isn't independent, it's dependent.
+- **Loop proof re-verified from the worktree** — `verify_loop.py` returns
+  `LOOP VERIFIED` from the fresh checkout, evidence in the worktree's own
+  `state/loop-proof.json`.
+
+Known worktree gap (noted, not fixed): `.opencode/node_modules` is
+gitignored, so the bun tests for `query-memory.ts` can't run in a fresh
+worktree without a reinstall. The tool file travels; its test deps don't.
+The python suite (78 tests) runs clean from a bare checkout.

@@ -80,6 +80,31 @@ def content_hash(text: str) -> str:
     return hashlib.sha256(text.encode()).hexdigest()
 
 
+def passage_metadata(p: dict) -> dict:
+    """Normalize metadata from a passage dict, whatever shape the service uses.
+
+    The Mnemosyne service stores the `metadata` sent at write time under a
+    `metadata_` key as a JSON-encoded STRING, not as a `metadata` dict.
+    Passages returned by query/exists therefore have `metadata_` set and
+    `metadata` None. Reads must handle both shapes, or metadata-based filters
+    silently stop matching (discovered 2026-08-18: resolution records were
+    written with source_file metadata but the read path couldn't see it —
+    and check.py's own source_file filter had been dead for the same reason).
+    """
+    md = p.get("metadata")
+    if isinstance(md, dict):
+        return md
+    raw = p.get("metadata_")
+    if isinstance(raw, str) and raw.strip():
+        try:
+            parsed = json.loads(raw)
+            if isinstance(parsed, dict):
+                return parsed
+        except (ValueError, TypeError):
+            pass
+    return {}
+
+
 def _query_archive(
     query_text: str,
     archive_id: str,
@@ -281,13 +306,20 @@ def _state_file(name: str) -> str:
     return os.path.join(repo_root, "state", name)
 
 
-def resolved_ids() -> list[str]:
-    """Passage ids the drift scanner should stop flagging.
+# The resolution ledger lives in TWO places:
+#   1. state/resolved.json — the local, gitignored cache (fast, offline).
+#   2. Mnemosyne, keyed by RESOLVED_SOURCE — the shared, durable record.
+# The memory copy is what gives a FRESH checkout cross-session continuity:
+# a new worktree with no local state/ dir can still know what a prior session
+# already resolved, because the knowledge lives in shared memory, not in a
+# gitignored file. This closes the cross-session continuity acceptance
+# criterion (Seamus05/Lab#1) at the same layer as the loop proof.
+RESOLVED_SOURCE = "huck/state/resolved.json"
+RESOLVED_TAGS = ["huck", "resolved"]
 
-    Reads state/resolved.json — a plain list of passage ids that have been
-    addressed in a prior Huck session. Used by check.py's unresolved scan
-    so a fixed item doesn't wake Huck forever.
-    """
+
+def _resolved_ids_local() -> list[str]:
+    """Passage ids from the local ledger (state/resolved.json)."""
     path = _state_file("resolved.json")
     try:
         with open(path) as f:
@@ -301,22 +333,97 @@ def resolved_ids() -> list[str]:
     return []
 
 
+def _resolved_ids_memory() -> list[str]:
+    """Passage ids from the shared-memory ledger.
+
+    Reads resolution records deterministically via exists(RESOLVED_SOURCE) —
+    mark_resolved() chronicles each record with metadata.source_file set to
+    RESOLVED_SOURCE and metadata.resolved_id holding the passage id, so the
+    lookup is exact, not fuzzy. The client-side source_file filter is belt
+    and braces: if the lookup endpoint ever returns extra records, resolutions
+    from a different ledger are not picked up. Returns [] when memory is
+    unreachable; the local ledger remains the fallback.
+    """
+    ids = []
+    try:
+        for p in exists(RESOLVED_SOURCE):
+            md = passage_metadata(p)
+            if md.get("source_file") != RESOLVED_SOURCE:
+                continue
+            rid = md.get("resolved_id")
+            if rid:
+                ids.append(str(rid))
+    except Exception as e:
+        logger.warning("resolved memory lookup failed: %s", e)
+    return ids
+
+
+def resolved_ids() -> list[str]:
+    """Passage ids the drift scanner should stop flagging.
+
+    Merges the LOCAL ledger (state/resolved.json) with the SHARED-MEMORY
+    ledger (resolution records chronicled by mark_resolved). The memory half
+    is what lets a fresh checkout reach the same "what's done" conclusion as
+    the checkout that did the work: resolution knowledge survives checkout
+    boundaries because it lives in Mnemosyne, not in gitignored state.
+    """
+    seen: dict[str, None] = {}
+    for pid in _resolved_ids_local() + _resolved_ids_memory():
+        if pid and pid not in seen:
+            seen[pid] = None
+    return list(seen)
+
+
+def _write_resolved_memory(passage_id: str) -> bool:
+    """Chronicle a resolution record to Mnemosyne, keyed by RESOLVED_SOURCE.
+
+    Dedup: if a record for this passage id already exists in memory, the
+    ledger is already complete — don't write a second passage. Returns True
+    when the record exists (written now or before).
+    """
+    try:
+        for p in exists(RESOLVED_SOURCE):
+            if passage_metadata(p).get("resolved_id") == passage_id:
+                return True
+        created = chronicle(
+            f"resolved: {passage_id}",
+            tags=RESOLVED_TAGS,
+            q_value=0.3,
+            metadata={"source_file": RESOLVED_SOURCE, "resolved_id": passage_id},
+        )
+        return bool(created and created.get("id"))
+    except Exception as e:
+        logger.warning("mark_resolved memory write failed: %s", e)
+        return False
+
+
 def mark_resolved(passage_id: str) -> bool:
-    """Record a passage id as addressed so the drift scanner stops flagging it."""
+    """Record a passage id as addressed so the drift scanner stops flagging it.
+
+    Writes BOTH the local ledger (fast, offline, but gitignored — does not
+    travel with a fresh checkout) AND a shared-memory resolution record
+    (durable, readable by any future checkout). The memory record is what
+    closes cross-session continuity: a new worktree with no state/ dir still
+    knows this work is done.
+
+    Returns True when the resolution persisted to at least one ledger.
+    """
     if not passage_id:
         return False
     path = _state_file("resolved.json")
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    ids = resolved_ids()
+    ids = _resolved_ids_local()
     if passage_id not in ids:
         ids.append(passage_id)
+    ok_local = False
     try:
         with open(path, "w") as f:
             json.dump({"ids": ids, "updated_at": datetime.now(timezone.utc).isoformat()}, f, indent=2)
-        return True
+        ok_local = True
     except OSError as e:
-        logger.warning("mark_resolved failed: %s", e)
-        return False
+        logger.warning("mark_resolved local write failed: %s", e)
+    ok_memory = _write_resolved_memory(passage_id)
+    return ok_local or ok_memory
 
 
 def roundtrip(
