@@ -2,4 +2,10 @@ state/
 .env
 *.pyc
 __pycache__/
-.opencode/
+
+# .opencode/ contains node_modules + opencode.json — keep those out of git,
+# but the custom tools in .opencode/tools/ ARE part of the repo (Huck built
+# query-memory.ts there; it must survive clones).
+.opencode/*
+!.opencode/tools/
+!.opencode/tools/**

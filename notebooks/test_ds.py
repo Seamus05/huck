@@ -1,12 +1,72 @@
 import unittest
 import sys
 import os
+import json
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import ds
 
 
-class TestContentHash(unittest.TestCase):
+def _mock_http_open(mock_open):
+    """Patch urllib.request.urlopen so tests never touch the real Mnemosyne DB.
+
+    ds.query() and ds.chronicle() make HTTP calls via urllib.request.urlopen.
+    Without mocking, running the test suite WRITES to the shared memory DB
+    (chronicle) and issues live queries — which, run every 5 min by huck-check,
+    flooded the archive with thousands of q=0.01 test passages (Aug 2026 purge).
+
+    This returns a fake response object whose .read() yields a JSON body the
+    calling function expects. We route by URL path: /archival-memory returns a
+    passage list (for query), and anything else returns a created passage (for
+    chronicle).
+    """
+
+    class FakeResp:
+        def __init__(self, body_bytes):
+            self._b = body_bytes
+
+        def read(self):
+            return self._b
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    def fake_open(req, *a, **k):
+        url = req.full_url if hasattr(req, "full_url") else str(req)
+        if "/archival-memory" in url and ("query=" in url or url.rstrip("/").endswith("/archival-memory")):
+            if "query=" in url:
+                body = json.dumps({"passages": [{"id": "mock-1", "text": "mock result", "tags": ["mock"], "q_value": 0.9}]}).encode()
+            else:
+                # chronicle POST returns the created passage
+                body = json.dumps({"id": "mock-created", "text": "mock", "created_at": "2026-01-01T00:00:00Z"}).encode()
+            return FakeResp(body)
+        # fallback: generic created-passage shape for unknown write endpoints
+        body = json.dumps({"id": "mock-created", "text": "mock", "created_at": "2026-01-01T00:00:00Z"}).encode()
+        return FakeResp(body)
+
+    mock_open.side_effect = fake_open
+
+
+class IsolatedTest(unittest.TestCase):
+    """Base class: mock the network so tests never touch the real Mnemosyne DB.
+
+    Without this, running the suite writes q=0.01 debris to shared memory and
+    issues live queries. huck-check runs this every 5 min, which is what flooded
+    the archive (2,224 debris passages purged 2026-08-18).
+    """
+
+    def setUp(self):
+        patcher = mock.patch.object(ds.urllib.request, "urlopen", autospec=True)
+        self._urlopen_mock = patcher.start()
+        self.addCleanup(patcher.stop)
+        _mock_http_open(self._urlopen_mock)
+
+
+class TestContentHash(IsolatedTest):
     def test_deterministic(self):
         self.assertEqual(ds.content_hash("hello"), ds.content_hash("hello"))
 
@@ -25,7 +85,7 @@ class TestContentHash(unittest.TestCase):
         self.assertEqual(h, ds.content_hash(""))
 
 
-class TestQuery(unittest.TestCase):
+class TestQuery(IsolatedTest):
     def test_empty_query_returns_empty(self):
         self.assertEqual(ds.query(""), [])
 
@@ -53,7 +113,7 @@ class TestQuery(unittest.TestCase):
         self.assertIsInstance(results, list)
 
 
-class TestLearn(unittest.TestCase):
+class TestLearn(IsolatedTest):
     def test_empty_query_returns_empty_shape(self):
         result = ds.learn("")
         self.assertEqual(result["count"], 0)
@@ -88,7 +148,7 @@ class TestLearn(unittest.TestCase):
         self.assertIsInstance(result["top_tags"], list)
 
 
-class TestExists(unittest.TestCase):
+class TestExists(IsolatedTest):
     def test_known_file(self):
         results = ds.exists("huck/notebooks/ds.py")
         self.assertIsInstance(results, list)
@@ -98,7 +158,7 @@ class TestExists(unittest.TestCase):
         self.assertEqual(results, [])
 
 
-class TestChronicle(unittest.TestCase):
+class TestChronicle(IsolatedTest):
     def test_write_and_verify(self):
         text = "ds.py unit test passage — auto-generated, safe to drop."
         result = ds.chronicle(

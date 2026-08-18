@@ -2,7 +2,9 @@
 
 Runs the test suite, checks docs-vs-filesystem consistency, verifies
 Mnemosyne connectivity, and queries for unresolved work. Writes a
-structured report to state/check.json and exits with a status code:
+structured report to state/check.json plus a self-updating health
+dashboard (state/health.json + state/dashboard.md) and exits with a
+status code:
 
   0 — all clear
   1 — drift detected (docs or code out of sync)
@@ -13,7 +15,6 @@ import json
 import os
 import subprocess
 import sys
-import time
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
@@ -25,6 +26,10 @@ import ds
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 STATE_DIR = os.path.join(REPO_ROOT, "state")
 CHECK_FILE = os.path.join(STATE_DIR, "check.json")
+HEALTH_FILE = os.path.join(STATE_DIR, "health.json")
+DASHBOARD_FILE = os.path.join(STATE_DIR, "dashboard.md")
+HISTORY_LIMIT = 200
+TRACKER_REPO = "Seamus05/Lab"
 NOW = datetime.now(timezone.utc).isoformat()
 
 
@@ -43,13 +48,13 @@ def _save_report(report: dict) -> None:
 
 
 def check_tests() -> dict:
-    test_file = os.path.join(REPO_ROOT, "notebooks", "test_ds.py")
     try:
         result = subprocess.run(
-            [sys.executable, test_file],
+            [sys.executable, "-m", "unittest", "discover",
+             "-s", os.path.join(REPO_ROOT, "notebooks"), "-p", "test_*.py"],
             capture_output=True,
             text=True,
-            timeout=30,
+            timeout=60,
         )
         passed = result.returncode == 0
         return {
@@ -81,27 +86,6 @@ def check_readme_tree() -> dict:
     with open(readme_path) as f:
         lines = f.readlines()
 
-    # Extract files mentioned in the layout tree
-    in_tree = False
-    tree_files = set()
-    for line in lines:
-        if line.strip() == "```" and in_tree:
-            break
-        if in_tree:
-            # Extract filename from tree drawing chars
-            cleaned = line.replace("├──", "").replace("└──", "").replace("│", "").strip()
-            if cleaned and not cleaned.endswith("/"):
-                # Split on # to remove comments
-                name = cleaned.split("#")[0].strip()
-                tree_files.add(name)
-        if line.strip().startswith("```") and "huck/" in lines[lines.index(line) - 1] if lines.index(line) > 0 else False:
-            in_tree = True
-        # Simpler: detect the start of the tree block
-        if line.strip() == "```" and any(
-            l.strip().startswith("huck/") for l in lines[max(0, lines.index(line) - 3) : lines.index(line)]
-        ):
-            in_tree = True
-
     # Parse the tree block with directory nesting
     tree_chars = {"│", "├", "└", "─", " "}
 
@@ -120,7 +104,10 @@ def check_readme_tree() -> dict:
 
     for i, line in enumerate(lines):
         if "## Layout" in line:
-            for j in range(i, min(i + 20, len(lines))):
+            # Scan the whole fenced block, not a fixed 20-line window.
+            # The window broke when the README tree grew past 20 lines
+            # (exposed 2026-08-18 by adding .opencode/tools/query-memory.ts).
+            for j in range(i, len(lines)):
                 raw = lines[j]
                 stripped = raw.strip()
                 if stripped == "```" and not in_tree:
@@ -205,34 +192,180 @@ def check_unresolved() -> dict:
             min_q=0.5,
             order_by="similarity",
         )
+        # Passages recorded as addressed in a prior Huck session (state/resolved.json)
+        # or explicitly tagged resolved no longer count as open work.
+        resolved = set(ds.resolved_ids())
+
+        # Completion chronicles (episodes, surveys, milestones) describe what
+        # happened, not what to do next. A passage only counts as unresolved
+        # if it carries an explicit action signal.
+        ACTION_SIGNALS = [
+            "unresolved", "deferred", "todo", "gap", "remaining",
+            "can you build", "to build", "pick one", "growth seed",
+            "next huck should", "next-session",
+        ]
+        COMPLETION_TAGS = {
+            "survey", "discovery", "lineage", "episode", "milestone",
+            "decision", "isolation-proof", "first-contact", "completion",
+        }
         items = []
         for r in results:
+            pid = r.get("id", "")
+            if pid in resolved or pid[:8] in resolved:
+                continue
             text = r.get("text", "")
             lower = text.lower()
             if not any(kw in lower for kw in [
                 "unresolved", "deferred", "todo", "gap", "build", "bridge", "growth",
             ]):
                 continue
-            tags = r.get("tags", [])
+            tags = set(r.get("tags", []))
             if "self-check" in tags:
                 continue
             if "opencode_session" in tags:
+                continue
+            if "resolved" in tags:
                 continue
             if "huck check" in lower:
                 continue
             if "check.py" in r.get("metadata", {}).get("source_file", ""):
                 continue
             meta_tags = {"documentation", "infrastructure", "persona", "readme", "test", "quality", "configuration"}
-            if meta_tags & set(tags):
+            if meta_tags & tags:
+                continue
+            # A passage that only mentions build/bridge/growth in passing is a
+            # chronicle of work done, not a seed of work to do. Require an
+            # action signal unless explicitly tagged for the next session.
+            if "next-session" not in tags and "seed" not in tags:
+                if not any(sig in lower for sig in ACTION_SIGNALS):
+                    continue
+            # Completion chronicles are records, not unresolved items — but a
+            # passage that is itself tagged next-session still counts.
+            if COMPLETION_TAGS & tags and "next-session" not in tags and "seed" not in tags:
                 continue
             items.append({
-                "id": r.get("id", "")[:8],
-                "tags": r.get("tags", []),
+                "id": pid[:8],
+                "tags": sorted(tags),
                 "snippet": text[:200],
             })
         return {"count": len(items), "items": items}
     except Exception as e:
         return {"error": str(e)}
+
+
+def check_tracker() -> dict:
+    """Bridge to the Seamus05/Lab#1 Wayfinder tracker (growth seed bridge 1).
+
+    Lists open wayfinder issues via the gh CLI. Informational only — the
+    tracker lives outside this repo's scope, so reachability or open-count
+    never flips the exit code. Falls back gracefully when gh is missing or
+    the network is down.
+    """
+    try:
+        result = subprocess.run(
+            [
+                "gh", "issue", "list", "-R", TRACKER_REPO,
+                "--state", "open", "--limit", "50",
+                "--json", "number,title,labels",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        if result.returncode != 0:
+            return {
+                "reachable": False,
+                "error": (result.stderr or result.stdout).strip()[:300],
+            }
+        issues = json.loads(result.stdout or "[]")
+        return {
+            "reachable": True,
+            "repo": TRACKER_REPO,
+            "open_count": len(issues),
+            "issues": [
+                {
+                    "number": i.get("number"),
+                    "title": i.get("title", ""),
+                    "labels": [l.get("name", "") for l in i.get("labels", [])],
+                }
+                for i in issues
+            ],
+        }
+    except Exception as e:
+        return {"reachable": False, "error": str(e)}
+
+
+def _load_health_history() -> list[dict]:
+    """Read previous health entries from state/health.json (if any)."""
+    try:
+        with open(HEALTH_FILE) as f:
+            data = json.load(f)
+            return data.get("history", []) if isinstance(data, dict) else []
+    except (FileNotFoundError, json.JSONDecodeError):
+        return []
+
+
+def _save_health(history: list[dict]) -> None:
+    """Persist health history (capped) to state/health.json."""
+    os.makedirs(STATE_DIR, exist_ok=True)
+    trimmed = history[-HISTORY_LIMIT:]
+    with open(HEALTH_FILE, "w") as f:
+        json.dump({"history": trimmed}, f, indent=2)
+
+
+def render_dashboard(entry: dict, history: list[dict]) -> str:
+    """Render a human-readable markdown dashboard from a health entry.
+
+    Pure function — easy to unit test without touching the filesystem.
+    """
+    lines = [
+        "# Huck health dashboard",
+        "",
+        f"_Generated {entry.get('time', '?')} by check.py_",
+        "",
+        "## Current",
+        "",
+        f"- Tests: {'PASS' if entry.get('tests_passed') else 'FAIL'}",
+        f"- Mnemosyne: {'reachable' if entry.get('mnemo_reachable') else 'UNREACHABLE'}",
+        f"- README tree: {'clean' if not entry.get('tree_drift') else 'DRIFT'}",
+        f"- Unresolved items in memory: {entry.get('unresolved_count', 0)}",
+    ]
+    if entry.get("tracker_reachable"):
+        lines.append(
+            f"- Tracker ({entry.get('tracker_repo', '?')}): "
+            f"{entry.get('tracker_open', '?')} open issues"
+        )
+    else:
+        lines.append("- Tracker: unreachable")
+    lines += [
+        "",
+        "## Trend (last {} runs)".format(min(len(history), 10)),
+        "",
+        "| time | exit | tests | mnemo | tree | unresolved | tracker |",
+        "|---|---|---|---|---|---|---|",
+    ]
+    for h in history[-10:]:
+        lines.append(
+            "| {} | {} | {} | {} | {} | {} | {} |".format(
+                (h.get("time") or "?")[:19],
+                h.get("exit_code", "?"),
+                "P" if h.get("tests_passed") else "F",
+                "Y" if h.get("mnemo_reachable") else "N",
+                "C" if not h.get("tree_drift") else "D",
+                h.get("unresolved_count", "?"),
+                h.get("tracker_open", "?") if h.get("tracker_reachable") else "-",
+            )
+        )
+    return "\n".join(lines) + "\n"
+
+
+def write_dashboard(entry: dict, history: list[dict]) -> None:
+    """Persist the health entry + history, and render dashboard.md."""
+    os.makedirs(STATE_DIR, exist_ok=True)
+    updated = history + [entry]
+    _save_health(updated)
+    with open(DASHBOARD_FILE, "w") as f:
+        f.write(render_dashboard(entry, updated))
 
 
 def main():
@@ -272,6 +405,17 @@ def main():
     else:
         print(f"  {unresolved['count']} items")
 
+    # 5. Tracker bridge (informational — never flips exit code)
+    print("─ tracker ─")
+    tracker = check_tracker()
+    report["checks"]["tracker"] = tracker
+    if tracker.get("reachable"):
+        print(f"  {tracker.get('open_count')} open issues in {TRACKER_REPO}")
+        for issue in tracker.get("issues", [])[:5]:
+            print(f"    #{issue['number']} {issue['title']}")
+    else:
+        print(f"  unreachable — {tracker.get('error', 'unknown')}")
+
     # Determine exit code
     report["exit_code"] = 0
     if not tests.get("passed") or not mnemo.get("reachable"):
@@ -298,6 +442,25 @@ def main():
     detail_changed = prev_fingerprint is None or fingerprint != prev_fingerprint
 
     report["fingerprint"] = fingerprint
+
+    # Health dashboard (bridge 3 of the growth seed) — self-updating,
+    # written on every run so the 5-minute timer keeps it fresh.
+    health_entry = {
+        "time": NOW,
+        "exit_code": report["exit_code"],
+        "tests_passed": tests.get("passed"),
+        "mnemo_reachable": mnemo.get("reachable"),
+        "tree_drift": tree.get("drift"),
+        "unresolved_count": unresolved.get("count", 0),
+        "tracker_reachable": tracker.get("reachable", False),
+        "tracker_repo": TRACKER_REPO,
+        "tracker_open": tracker.get("open_count", 0) if tracker.get("reachable") else None,
+    }
+    try:
+        history = _load_health_history()
+        write_dashboard(health_entry, history)
+    except Exception as e:
+        report["dashboard_error"] = str(e)
 
     report["changed_since_last"] = detail_changed
     report["transition"] = transition

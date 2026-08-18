@@ -2,6 +2,9 @@
 
 chronicle() writes observations to Mnemosyne (openframe-memory).
 query() searches archival passages.
+learn() aggregates patterns across the whole shared corpus.
+mark_resolved()/resolved_ids() track which passages the drift scanner
+should stop flagging.
 """
 
 import os
@@ -11,6 +14,7 @@ import logging
 import urllib.error
 import urllib.parse
 import urllib.request
+from datetime import datetime, timezone
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -187,3 +191,47 @@ def exists(source_file: str) -> list[dict]:
     except (urllib.error.URLError, urllib.error.HTTPError, OSError) as e:
         logger.warning("exists failed: %s", e)
         return []
+
+
+def _state_file(name: str) -> str:
+    """Resolve a state file in the repo state/ dir (repo root /state)."""
+    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(repo_root, "state", name)
+
+
+def resolved_ids() -> list[str]:
+    """Passage ids the drift scanner should stop flagging.
+
+    Reads state/resolved.json — a plain list of passage ids that have been
+    addressed in a prior Huck session. Used by check.py's unresolved scan
+    so a fixed item doesn't wake Huck forever.
+    """
+    path = _state_file("resolved.json")
+    try:
+        with open(path) as f:
+            data = json.load(f)
+        if isinstance(data, list):
+            return [str(x) for x in data]
+        if isinstance(data, dict):
+            return [str(x) for x in data.get("ids", [])]
+    except (FileNotFoundError, json.JSONDecodeError):
+        pass
+    return []
+
+
+def mark_resolved(passage_id: str) -> bool:
+    """Record a passage id as addressed so the drift scanner stops flagging it."""
+    if not passage_id:
+        return False
+    path = _state_file("resolved.json")
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    ids = resolved_ids()
+    if passage_id not in ids:
+        ids.append(passage_id)
+    try:
+        with open(path, "w") as f:
+            json.dump({"ids": ids, "updated_at": datetime.now(timezone.utc).isoformat()}, f, indent=2)
+        return True
+    except OSError as e:
+        logger.warning("mark_resolved failed: %s", e)
+        return False
