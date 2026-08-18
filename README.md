@@ -28,6 +28,7 @@ huck/
 │   ├── test_check.py   # unit tests for check.py dashboard + tracker
 │   └── test_query_memory.ts # bun tests for .opencode/tools/query-memory.ts
 ├── prompts/            # experiment/task prompts given to Huck
+│   └── build-query-tool.md  # the query-tool experiment brief (this build)
 ├── state/              # runtime state (git-ignored): check.json, health.json, dashboard.md
 └── README.md
 ```
