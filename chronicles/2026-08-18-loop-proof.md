@@ -1,8 +1,8 @@
 # Chronicle 2026-08-18 — Huck proves his own loop (write → read → match)
 
 Deliverable: `ds.roundtrip()`, `notebooks/verify_loop.py`, a read-path probe
-in `check.py`, a hardened unresolved filter, 29 new tests. Commit `???` (see
-git log). Verified live: `LOOP VERIFIED`, `check.py` exit 0.
+in `check.py`, a hardened unresolved filter, 29 new tests. Commit `5cbaa76`.
+Verified live: `LOOP VERIFIED`, `check.py` exit 0.
 
 ## The gap I closed
 
