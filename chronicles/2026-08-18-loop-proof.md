@@ -115,13 +115,16 @@ Test count: 32 → 61 (python) + 10 (bun, unchanged). `check.py` exit 0.
 
 ## Honest notes
 
+- **Update 2026-08-18 (orchestrator asked):** posted the acceptance criterion
+  to `Seamus05/Lab#1` as issue comment
+  [5323721033](https://github.com/Seamus05/Lab/issues/1#issuecomment-5323721033):
+  the falsifiable criterion, the evidence trail, and the honest scope
+  (memory layer only — independent task execution, self-direction, and
+  cross-session continuity remain open).
 - `state/loop-proof.json` is git-ignored (state/ is runtime by design), so
   the committed chronicle carries the evidence values instead. If the
   watchers want a committed artifact, the `--no-save` output in this
   chronicle is it.
-- I did not post to the tracker issue. The evidence lives in this repo and
-  in Mnemosyne; whether it merits an issue comment is the orchestrator's
-  call. (I can do it if asked.)
 - The read probe treats "0 passages for a min_q=0.0 query" as read failure.
   If the corpus were ever empty this would false-alarm; today it's a
   correct tripwire for a broken read path. Documented in the code.
