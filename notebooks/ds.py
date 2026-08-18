@@ -23,6 +23,18 @@ MEMORY_URL = os.environ.get("OPENFRAME_MEMORY_URL", "http://10.70.0.10:8381")
 DEFAULT_AGENT = os.environ.get("OPENFRAME_AGENT_ROLE", "host-manager")
 DEFAULT_ARCHIVE = "default"
 
+# The shared corpus is split across several archives (discovered by Huck's
+# query-memory tool, 2026-08-18):
+#   - UUID archive (MNEMOSYNE_ID)  ~761 passages — where the inline write tools
+#     (send-message / write-observation) land.
+#   - "default"                     ~395 passages — where ds.chronicle() writes.
+#   - infra-lessons / phaedrus / mori — smaller named archives.
+# A read that only hits archive_id="default" (ds.query()'s old default) saw
+# under 40% of the corpus. query()/learn() now fan out across ALL of these and
+# merge, matching the fleet query-memory tool.
+MNEMOSYNE_ID = os.environ.get("MNEMOSYNE_ID", "agent-b0c24e6b-303d-433a-a166-4881c563661d")
+KNOWN_ARCHIVES = [MNEMOSYNE_ID, "default", "infra-lessons", "phaedrus", "mori"]
+
 
 def chronicle(
     text: str,
@@ -66,23 +78,15 @@ def content_hash(text: str) -> str:
     return hashlib.sha256(text.encode()).hexdigest()
 
 
-def query(
+def _query_archive(
     query_text: str,
-    limit: int = 5,
-    min_q: float = 0.5,
-    agent_id: Optional[str] = None,
-    archive_id: str = DEFAULT_ARCHIVE,
-    order_by: str = "similarity",
-) -> list[dict]:
-    """Search archival memory by semantic similarity.
-
-    Returns a list of passage dicts, each with id, text, tags, q_value, etc.
-    """
-    if not query_text or not query_text.strip():
-        return []
-    if limit < 1:
-        limit = 5
-    agent = agent_id or DEFAULT_AGENT
+    archive_id: str,
+    limit: int,
+    min_q: float,
+    order_by: str,
+    agent: str,
+) -> tuple[list[dict], Optional[str]]:
+    """Query a single archive. Returns (passages, error-or-None)."""
     params = urllib.parse.urlencode({
         "query": query_text,
         "limit": limit,
@@ -94,10 +98,83 @@ def query(
     try:
         with urllib.request.urlopen(url, timeout=10) as resp:
             result = json.loads(resp.read().decode())
-            return result.get("passages", [])
+            # The service's search SELECT does not return archive_id; tag each
+            # passage with the archive it came from (mirrors query-memory.ts).
+            return [
+                {**p, "archive_id": archive_id}
+                for p in result.get("passages", [])
+            ], None
     except (urllib.error.URLError, urllib.error.HTTPError, OSError) as e:
-        logger.warning("query failed: %s", e)
+        logger.warning("query archive %s failed: %s", archive_id, e)
+        return [], str(e)
+
+
+def query(
+    query_text: str,
+    limit: int = 5,
+    min_q: float = 0.5,
+    agent_id: Optional[str] = None,
+    archive_id: Optional[str] = None,
+    order_by: str = "similarity",
+    tracked: bool = True,
+) -> list[dict]:
+    """Search archival memory by semantic similarity.
+
+    Defaults to cross-archive search across ALL known archives (the corpus is
+    split across the UUID archive written by the inline tools, "default" written
+    by ds.chronicle(), and named archives). Pass archive_id to narrow to one
+    archive (or a comma-separated list).
+
+    Returns a list of passage dicts, each with id, text, tags, q_value, etc.
+    """
+    if not query_text or not query_text.strip():
         return []
+    if limit < 1:
+        limit = 5
+    agent = agent_id or DEFAULT_AGENT
+
+    # Resolve target archives. None / "all" / empty -> every known archive.
+    if archive_id in (None, "all", ""):
+        targets = KNOWN_ARCHIVES
+    else:
+        targets = [a.strip() for a in archive_id.split(",") if a.strip()]
+    if not targets:
+        return []
+
+    # Per-archive fetch 2x the requested limit so the cross-archive merge has
+    # better recall; we re-rank and truncate to `limit` at the end.
+    per_archive = max(1, min(limit * 2, 50))
+
+    results_per_archive: list[tuple[list[dict], Optional[str]]] = [
+        _query_archive(query_text, a, per_archive, min_q, order_by, agent)
+        for a in targets
+    ]
+
+    # Merge, dedupe by id.
+    seen: dict[str, dict] = {}
+    for passages, _err in results_per_archive:
+        for p in passages:
+            pid = p.get("id")
+            if pid and pid not in seen:
+                seen[pid] = p
+    merged = list(seen.values())
+
+    # Re-rank after merge across ALL archives (not just within each archive).
+    # The service returns a `similarity` per passage; without a global re-rank
+    # the first archive in KNOWN_ARCHIVES would dominate the slice even when
+    # another archive has closer matches.
+    if order_by == "recency":
+        merged.sort(
+            key=lambda p: p.get("created_at") or "",
+            reverse=True,
+        )
+    else:
+        merged.sort(
+            key=lambda p: p.get("similarity") if p.get("similarity") is not None else -1,
+            reverse=True,
+        )
+
+    return merged[:limit]
 
 
 def learn(
@@ -106,7 +183,7 @@ def learn(
     min_q: float = 0.0,
     agents: Optional[list[str]] = None,
     top_tags: int = 10,
-    archive_id: str = DEFAULT_ARCHIVE,
+    archive_id: Optional[str] = None,
 ) -> dict:
     """Query the whole shared corpus and extract recurring patterns.
 
@@ -124,7 +201,8 @@ def learn(
         agents: optional list of agent ids (e.g. ['phaedrus', 'kairos']) to
             restrict to. None means the whole corpus.
         top_tags: how many most-common tags to return.
-        archive_id: which archive to read from.
+        archive_id: which archive to read from. None (default) reads across
+            all known archives, matching query().
 
     Returns:
         dict with:
