@@ -138,5 +138,140 @@ class TestTracker(unittest.TestCase):
         self.assertFalse(result["reachable"])
 
 
+class TestMnemosyneCheck(unittest.TestCase):
+    """check_mnemosyne now probes the read path, not just /health.
+
+    A loop that can write but not read is a broken pattern, so a failed read
+    probe must make the service 'unreachable' from the check's point of view.
+    All network is mocked — never touch the real Mnemosyne DB in tests.
+    """
+
+    @mock.patch("urllib.request.urlopen")
+    def test_reachable_when_health_and_read_ok(self, mock_urlopen):
+        mock_urlopen.return_value.__enter__.return_value.read.return_value = (
+            b'{"status":"ok"}'
+        )
+        with mock.patch.object(check.ds, "query", return_value=[{"id": "x"}]):
+            result = check.check_mnemosyne()
+        self.assertTrue(result["reachable"])
+        self.assertTrue(result["read"]["ok"])
+        self.assertEqual(result["status"], "ok")
+
+    @mock.patch("urllib.request.urlopen")
+    def test_unreachable_when_read_probe_empty(self, mock_urlopen):
+        mock_urlopen.return_value.__enter__.return_value.read.return_value = (
+            b'{"status":"ok"}'
+        )
+        with mock.patch.object(check.ds, "query", return_value=[]):
+            result = check.check_mnemosyne()
+        self.assertFalse(result["reachable"])
+        self.assertFalse(result["read"]["ok"])
+        self.assertIn("0 passages", result["read"].get("error", ""))
+
+    @mock.patch("urllib.request.urlopen")
+    def test_unreachable_when_health_down(self, mock_urlopen):
+        mock_urlopen.side_effect = OSError("down")
+        with mock.patch.object(check.ds, "query", return_value=[]) as mock_query:
+            result = check.check_mnemosyne()
+        self.assertFalse(result["reachable"])
+        self.assertIn("error", result)
+        mock_query.assert_not_called()  # no read probe when health is down
+
+    @mock.patch("urllib.request.urlopen")
+    def test_read_probe_is_write_free(self, mock_urlopen):
+        mock_urlopen.return_value.__enter__.return_value.read.return_value = (
+            b'{"status":"ok"}'
+        )
+        with mock.patch.object(check.ds, "query", return_value=[{"id": "x"}]) as mock_query:
+            check.check_mnemosyne()
+        _, kwargs = mock_query.call_args
+        self.assertFalse(kwargs.get("tracked", True), "read probe must not bump counters")
+        self.assertEqual(kwargs.get("limit"), 1)
+        self.assertEqual(kwargs.get("min_q"), 0.0)
+
+
+class TestIsUnresolved(unittest.TestCase):
+    """The unresolved-item filter is pure logic — test it without the network.
+
+    Guardrail: records of work done must not wake Huck; seeds of work to do
+    must. Completion chronicles are detected by structure as well as tags.
+    """
+
+    def _p(self, text, tags=None, pid="p1", source_file=None):
+        r = {"id": pid, "text": text, "tags": tags or []}
+        if source_file:
+            r["metadata"] = {"source_file": source_file}
+        return r
+
+    def test_episode_chronicle_not_unresolved(self):
+        r = self._p(
+            "## Episode: Open Computer Direction — Plan Ratified PASS 0.85\n"
+            "### What was asked\nBuild Phase 0 (bubblewrap sandbox).",
+            tags=["phaedrus", "chronicle", "phase-0-complete"],
+        )
+        self.assertFalse(check._is_unresolved(r, set()))
+
+    def test_alignment_signal_not_unresolved(self):
+        r = self._p(
+            "## Alignment Signal: HAZ Paper — Formal Validation\n"
+            "### The Three-Loop Architecture\nInner Loop (GRPO):",
+            tags=["phaedrus", "chronicle", "alignment-signal"],
+        )
+        self.assertFalse(check._is_unresolved(r, set()))
+
+    def test_past_tense_completion_not_unresolved(self):
+        r = self._p(
+            "Created pipeline_health_gate.py and integrated into ground skill A2b. "
+            "The gate checks 3 layers and outputs verdicts.",
+            tags=["carlin", "kairos", "ground-skill"],
+        )
+        self.assertFalse(check._is_unresolved(r, set()))
+
+    def test_seed_with_next_session_tag_is_unresolved(self):
+        r = self._p(
+            "Growth seed — bridges to build. (1) The Wayfinder episode.",
+            tags=["huck", "growth", "seed", "next-session"],
+        )
+        self.assertTrue(check._is_unresolved(r, set()))
+
+    def test_explicit_action_is_unresolved(self):
+        r = self._p(
+            "Remaining: can you build a loop-proof tool? Pick one.",
+            tags=["huck"],
+        )
+        self.assertTrue(check._is_unresolved(r, set()))
+
+    def test_resolved_id_skipped(self):
+        r = self._p("build the next bridge", pid="abc12345")
+        self.assertFalse(check._is_unresolved(r, {"abc12345"}))
+
+    def test_self_check_skipped(self):
+        r = self._p("Huck check: drift detected — build", tags=["self-check"])
+        self.assertFalse(check._is_unresolved(r, set()))
+
+    def test_meta_tag_skipped(self):
+        r = self._p("TODO: document the build", tags=["documentation"])
+        self.assertFalse(check._is_unresolved(r, set()))
+
+    def test_no_base_signal_skipped(self):
+        r = self._p("just a random note about the weather")
+        self.assertFalse(check._is_unresolved(r, set()))
+
+    def test_next_session_exempts_completion_structure(self):
+        # Explicitly tagged for the next session: counts even with episode shape.
+        r = self._p(
+            "## Episode: done thing\n### Approach\nnext huck should build X",
+            tags=["huck", "next-session"],
+        )
+        self.assertTrue(check._is_unresolved(r, set()))
+
+    def test_check_py_source_skipped(self):
+        r = self._p(
+            "build bridge",
+            source_file="huck/notebooks/check.py",
+        )
+        self.assertFalse(check._is_unresolved(r, set()))
+
+
 if __name__ == "__main__":
     unittest.main()

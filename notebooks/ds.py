@@ -11,6 +11,8 @@ import os
 import json
 import hashlib
 import logging
+import time
+import uuid
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -85,6 +87,7 @@ def _query_archive(
     min_q: float,
     order_by: str,
     agent: str,
+    tracked: bool = True,
 ) -> tuple[list[dict], Optional[str]]:
     """Query a single archive. Returns (passages, error-or-None)."""
     params = urllib.parse.urlencode({
@@ -93,6 +96,7 @@ def _query_archive(
         "min_q": min_q,
         "archive_id": archive_id,
         "order_by": order_by,
+        "tracked": "true" if tracked else "false",
     })
     url = f"{MEMORY_URL}/v1/agents/{agent}/archival-memory?{params}"
     try:
@@ -146,7 +150,7 @@ def query(
     per_archive = max(1, min(limit * 2, 50))
 
     results_per_archive: list[tuple[list[dict], Optional[str]]] = [
-        _query_archive(query_text, a, per_archive, min_q, order_by, agent)
+        _query_archive(query_text, a, per_archive, min_q, order_by, agent, tracked=tracked)
         for a in targets
     ]
 
@@ -313,3 +317,99 @@ def mark_resolved(passage_id: str) -> bool:
     except OSError as e:
         logger.warning("mark_resolved failed: %s", e)
         return False
+
+
+def roundtrip(
+    tag: str = "loop-proof",
+    agent_id: Optional[str] = None,
+    archive_id: str = DEFAULT_ARCHIVE,
+    retries: int = 1,
+) -> dict:
+    """Prove the isolated-agent write→read loop end-to-end.
+
+    Writes a unique marker passage to Mnemosyne, then queries it back through
+    the real semantic-search path, and verifies the SAME passage id comes
+    back. This is the pattern's core claim: an isolated agent can record its
+    state to shared memory and retrieve it again — not just write, not just
+    read, but round-trip.
+
+    Deliberate, not timer-driven: each call leaves ONE marker passage in the
+    archive (tags: huck, loop-proof). Use it when you want to demonstrate or
+    record that the loop works. Do not call it from the 5-minute check — the
+    check's read probe is deliberately write-free.
+
+    Returns an evidence dict:
+        ok        — True when the written id is found in the query results
+        marker    — the exact marker text written
+        write_id  — passage id returned by chronicle() (None if write failed)
+        read_id   — id of the passage the query returned for the marker
+        match     — True when write_id == read_id
+        results   — how many passages the query returned
+        tag       — the marker tag
+        archive   — archive used
+        steps     — {"write": "ok"|"failed", "read": "ok"|"empty"|"skipped"}
+        retried   — True if the first read came back empty and a retry helped
+    """
+    marker = (
+        f"{tag} {uuid.uuid4().hex[:8]} "
+        f"{datetime.now(timezone.utc).isoformat()}"
+    )
+    created = chronicle(
+        marker,
+        tags=["huck", "loop-proof", f"tag:{tag}"],
+        q_value=0.5,
+        agent_id=agent_id,
+        archive_id=archive_id,
+    )
+    write_id = created.get("id") if isinstance(created, dict) else None
+    if not write_id:
+        return {
+            "ok": False,
+            "marker": marker,
+            "write_id": None,
+            "read_id": None,
+            "match": False,
+            "results": 0,
+            "tag": tag,
+            "archive": archive_id,
+            "steps": {"write": "failed", "read": "skipped"},
+            "retried": False,
+        }
+
+    def _read() -> list[dict]:
+        return query(
+            marker,
+            limit=5,
+            min_q=0.0,
+            agent_id=agent_id,
+            archive_id=archive_id,
+            order_by="similarity",
+            tracked=False,  # the verification read must not bump counters
+        )
+
+    results = _read()
+    # Semantic indexes can lag a write by a beat; one quiet retry is cheap
+    # and only happens on an empty first read.
+    retried = False
+    if not results and retries > 0:
+        time.sleep(1.0)
+        results = _read()
+        retried = True
+
+    ids = [r.get("id") for r in results if r.get("id")]
+    match = write_id in ids
+    return {
+        "ok": match,
+        "marker": marker,
+        "write_id": write_id,
+        "read_id": write_id if match else (ids[0] if ids else None),
+        "match": match,
+        "results": len(ids),
+        "tag": tag,
+        "archive": archive_id,
+        "steps": {
+            "write": "ok",
+            "read": "ok" if ids else "empty",
+        },
+        "retried": retried,
+    }

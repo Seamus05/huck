@@ -51,6 +51,46 @@ def _mock_http_open(mock_open):
     mock_open.side_effect = fake_open
 
 
+def _FakeResp(body_bytes):
+    class FakeResp:
+        def __init__(self, body_bytes):
+            self._b = body_bytes
+
+        def read(self):
+            return self._b
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    return FakeResp(body_bytes)
+
+
+def _mock_roundtrip_http_open(mock_open):
+    """Stateful fake for ds.roundtrip: writes return id 'rt-abc123', reads return it."""
+
+    def fake_open(req, *a, **k):
+        url = req.full_url if hasattr(req, "full_url") else str(req)
+        if "query=" in url:
+            body = json.dumps({"passages": [{
+                "id": "rt-abc123",
+                "text": "loop-proof marker",
+                "tags": ["huck", "loop-proof"],
+                "q_value": 0.9,
+            }]}).encode()
+        else:
+            body = json.dumps({
+                "id": "rt-abc123",
+                "text": "loop-proof marker",
+                "created_at": "2026-01-01T00:00:00Z",
+            }).encode()
+        return _FakeResp(body)
+
+    mock_open.side_effect = fake_open
+
+
 class IsolatedTest(unittest.TestCase):
     """Base class: mock the network so tests never touch the real Mnemosyne DB.
 
@@ -192,6 +232,112 @@ class TestChronicle(IsolatedTest):
             metadata={"source_file": "huck/notebooks/test_ds.py", "test": True},
         )
         self.assertIn("id", result)
+
+
+class TestQueryTracked(IsolatedTest):
+    """ds.query must forward `tracked` to the service.
+
+    Discovered during the loop-proof build: the Python port accepted a
+    `tracked` parameter but never sent it, so every query silently bumped
+    survival counters. Fixed in _query_archive.
+    """
+
+    def _urls(self):
+        return [
+            call.args[0] if call.args else ""
+            for call in self._urlopen_mock.call_args_list
+        ]
+
+    def test_tracked_false_forwarded(self):
+        ds.query("huck", limit=1, min_q=0.0, tracked=False)
+        urls = self._urls()
+        self.assertTrue(urls)
+        self.assertTrue(all("tracked=false" in u for u in urls))
+
+    def test_tracked_true_default_forwarded(self):
+        ds.query("huck", limit=1, min_q=0.0)
+        urls = self._urls()
+        self.assertTrue(urls)
+        self.assertTrue(all("tracked=true" in u for u in urls))
+
+
+class TestRoundtrip(unittest.TestCase):
+    """ds.roundtrip() with a mocked network — never touches real Mnemosyne.
+
+    The whole point of the roundtrip proof is that an isolated agent can
+    write a marker and read the SAME passage back. These tests verify the
+    logic against a fake service, so the real proof run can be saved as
+    evidence instead of being polluted by the test suite.
+    """
+
+    def setUp(self):
+        patcher = mock.patch.object(ds.urllib.request, "urlopen", autospec=True)
+        self._urlopen_mock = patcher.start()
+        self.addCleanup(patcher.stop)
+        _mock_roundtrip_http_open(self._urlopen_mock)
+
+    def test_matching_roundtrip(self):
+        ev = ds.roundtrip()
+        self.assertTrue(ev["ok"])
+        self.assertTrue(ev["match"])
+        self.assertEqual(ev["write_id"], "rt-abc123")
+        self.assertEqual(ev["read_id"], "rt-abc123")
+        self.assertGreaterEqual(ev["results"], 1)
+        self.assertEqual(ev["steps"]["write"], "ok")
+        self.assertEqual(ev["steps"]["read"], "ok")
+        self.assertIn("loop-proof", ev["marker"])
+        self.assertFalse(ev["retried"])
+
+    def test_custom_tag_in_marker(self):
+        ev = ds.roundtrip(tag="weekly")
+        self.assertIn("weekly", ev["marker"])
+        self.assertIn("weekly", ev["tag"])
+
+    def test_write_failure_returns_failed_evidence(self):
+        self._urlopen_mock.side_effect = OSError("service down")
+        ev = ds.roundtrip()
+        self.assertFalse(ev["ok"])
+        self.assertFalse(ev["match"])
+        self.assertIsNone(ev["write_id"])
+        self.assertEqual(ev["steps"]["write"], "failed")
+        self.assertEqual(ev["steps"]["read"], "skipped")
+
+    def test_read_mismatch_not_ok(self):
+        def fake(req, *a, **k):
+            url = req.full_url if hasattr(req, "full_url") else str(req)
+            if "query=" in url:
+                body = json.dumps({"passages": [{
+                    "id": "other-id", "text": "x", "q_value": 0.9,
+                }]}).encode()
+            else:
+                body = json.dumps({
+                    "id": "rt-abc123", "created_at": "2026-01-01T00:00:00Z",
+                }).encode()
+            return _FakeResp(body)
+
+        self._urlopen_mock.side_effect = fake
+        ev = ds.roundtrip(retries=0)
+        self.assertFalse(ev["ok"])
+        self.assertFalse(ev["match"])
+        self.assertEqual(ev["steps"]["read"], "ok")  # read found something, just not ours
+        self.assertEqual(ev["read_id"], "other-id")
+
+    def test_empty_read_not_ok(self):
+        def fake(req, *a, **k):
+            url = req.full_url if hasattr(req, "full_url") else str(req)
+            if "query=" in url:
+                body = json.dumps({"passages": []}).encode()
+            else:
+                body = json.dumps({
+                    "id": "rt-abc123", "created_at": "2026-01-01T00:00:00Z",
+                }).encode()
+            return _FakeResp(body)
+
+        self._urlopen_mock.side_effect = fake
+        ev = ds.roundtrip(retries=0)
+        self.assertFalse(ev["ok"])
+        self.assertEqual(ev["steps"]["read"], "empty")
+        self.assertEqual(ev["results"], 0)
 
 
 if __name__ == "__main__":

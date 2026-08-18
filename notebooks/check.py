@@ -32,6 +32,50 @@ HISTORY_LIMIT = 200
 TRACKER_REPO = "Seamus05/Lab"
 NOW = datetime.now(timezone.utc).isoformat()
 
+# ---- unresolved-item decision vocabulary (see _is_unresolved) ----
+
+# A passage must mention one of these to be a candidate at all.
+BASE_SIGNALS = [
+    "unresolved", "deferred", "todo", "gap", "build", "bridge", "growth",
+]
+
+# Explicit action-to-do phrasing. Seeds tagged next-session/seed are exempt.
+ACTION_SIGNALS = [
+    "unresolved", "deferred", "todo", "gap", "remaining",
+    "can you build", "to build", "pick one", "growth seed",
+    "next huck should", "next-session",
+]
+
+# Completion tags: records of work done, not seeds of work to do.
+COMPLETION_TAGS = {
+    "survey", "discovery", "lineage", "episode", "milestone",
+    "decision", "isolation-proof", "first-contact", "completion",
+}
+
+# Text-structure markers of completion chronicles. Added 2026-08-18 after
+# six untagged episode chronicles surfaced as false unresolved items —
+# chronicles don't always carry completion tags, but they do carry shape.
+COMPLETION_TEXT_MARKERS = (
+    "## episode:",
+    "## alignment signal:",
+    "### what was asked",
+    "### what was done",
+    "### outcome",
+    "### result",
+    "### approach",
+    "### milestone",
+    "### central thesis",
+    "### source",
+    "### context",
+)
+
+# Past-tense openings: "Created X and integrated Y" is a record, not a seed.
+# Deliberately excludes "built"/"build" — "Build X" is how a seed talks.
+COMPLETION_OPENERS = (
+    "created ", "wrote ", "implemented ", "updated ",
+    "integrated ", "moved ", "added ",
+)
+
 
 def _load_previous() -> dict | None:
     try:
@@ -68,14 +112,45 @@ def check_tests() -> dict:
 
 
 def check_mnemosyne() -> dict:
+    """Verify Mnemosyne is reachable AND the read path of the loop works.
+
+    /health proves the service answers. A read-side probe (no writes,
+    tracked=False) proves the semantic-search path an isolated agent depends
+    on actually returns passages. A loop that can write but not read is a
+    loop that can't learn from its own past — that's a broken pattern, so a
+    failed read probe is treated the same as an unreachable service.
+    """
     try:
         url = f"{ds.MEMORY_URL}/health"
         req = urllib.request.Request(url)
         with urllib.request.urlopen(req, timeout=5) as resp:
             data = json.loads(resp.read().decode())
-            return {"reachable": True, "status": data.get("status", "unknown")}
+            health = {"reachable": True, "status": data.get("status", "unknown")}
     except Exception as e:
-        return {"reachable": False, "error": str(e)}
+        health = {"reachable": False, "error": str(e)}
+
+    read = {"ok": False, "results": 0}
+    if health.get("reachable"):
+        try:
+            # No writes — this runs every 5 minutes. tracked=False so the
+            # probe never bumps survival counters.
+            results = ds.query("system healthy", limit=1, min_q=0.0, tracked=False)
+            read = {"ok": len(results) > 0, "results": len(results)}
+            if not read["ok"]:
+                read["error"] = (
+                    "read probe returned 0 passages (search path may be broken)"
+                )
+        except Exception as e:
+            read = {"ok": False, "error": str(e)}
+
+    result = {
+        "reachable": bool(health.get("reachable") and read["ok"]),
+        "status": health.get("status", "unknown"),
+        "read": read,
+    }
+    if health.get("error"):
+        result["error"] = health["error"]
+    return result
 
 
 def check_readme_tree() -> dict:
@@ -181,6 +256,68 @@ def check_readme_tree() -> dict:
     }
 
 
+def _is_completion_record(lower: str, tags: set) -> bool:
+    """Is this passage a record of work done, not a seed of work to do?
+
+    Completion chronicles (episodes, alignment signals, status reports) are
+    usually tagged with completion markers, but not always — discovered
+    2026-08-18 when six untagged episode chronicles surfaced as false
+    unresolved items. So records are detected by TAG and by TEXT STRUCTURE:
+    episode/signal headers, work-report section markers, and past-tense
+    openings that seeds (imperative prose) don't use.
+    """
+    if COMPLETION_TAGS & tags:
+        return True
+    if lower.startswith(COMPLETION_OPENERS):
+        return True
+    return any(m in lower for m in COMPLETION_TEXT_MARKERS)
+
+
+def _is_unresolved(r: dict, resolved: set) -> bool:
+    """Decide whether a passage is unresolved work for Huck.
+
+    Pure decision logic — unit-testable without the network. A passage is
+    unresolved only when it is a seed of work to do, not a record of work
+    done. Records are completion chronicles (episodes, signals, status
+    reports), detected by tag AND text structure, because chronicles don't
+    always carry completion tags.
+    """
+    pid = r.get("id", "")
+    if pid in resolved or pid[:8] in resolved:
+        return False
+    text = r.get("text", "")
+    lower = text.lower()
+    if not any(kw in lower for kw in BASE_SIGNALS):
+        return False
+    tags = set(r.get("tags", []))
+    if "self-check" in tags:
+        return False
+    if "opencode_session" in tags:
+        return False
+    if "resolved" in tags:
+        return False
+    if "huck check" in lower:
+        return False
+    if "check.py" in r.get("metadata", {}).get("source_file", ""):
+        return False
+    meta_tags = {"documentation", "infrastructure", "persona", "readme", "test", "quality", "configuration"}
+    if meta_tags & tags:
+        return False
+    # A passage that only mentions build/bridge/growth in passing is a
+    # chronicle of work done, not a seed of work to do. Require an action
+    # signal unless explicitly tagged for the next session.
+    if "next-session" not in tags and "seed" not in tags:
+        if _is_completion_record(lower, tags):
+            return False
+        if not any(sig in lower for sig in ACTION_SIGNALS):
+            return False
+        # Completion chronicles are records, not unresolved items — but a
+        # passage that is itself tagged next-session still counts.
+        if COMPLETION_TAGS & tags:
+            return False
+    return True
+
+
 def check_unresolved() -> dict:
     try:
         # Similarity ordering (not recency) so recent self-check passages
@@ -195,58 +332,14 @@ def check_unresolved() -> dict:
         # Passages recorded as addressed in a prior Huck session (state/resolved.json)
         # or explicitly tagged resolved no longer count as open work.
         resolved = set(ds.resolved_ids())
-
-        # Completion chronicles (episodes, surveys, milestones) describe what
-        # happened, not what to do next. A passage only counts as unresolved
-        # if it carries an explicit action signal.
-        ACTION_SIGNALS = [
-            "unresolved", "deferred", "todo", "gap", "remaining",
-            "can you build", "to build", "pick one", "growth seed",
-            "next huck should", "next-session",
-        ]
-        COMPLETION_TAGS = {
-            "survey", "discovery", "lineage", "episode", "milestone",
-            "decision", "isolation-proof", "first-contact", "completion",
-        }
         items = []
         for r in results:
-            pid = r.get("id", "")
-            if pid in resolved or pid[:8] in resolved:
-                continue
-            text = r.get("text", "")
-            lower = text.lower()
-            if not any(kw in lower for kw in [
-                "unresolved", "deferred", "todo", "gap", "build", "bridge", "growth",
-            ]):
-                continue
-            tags = set(r.get("tags", []))
-            if "self-check" in tags:
-                continue
-            if "opencode_session" in tags:
-                continue
-            if "resolved" in tags:
-                continue
-            if "huck check" in lower:
-                continue
-            if "check.py" in r.get("metadata", {}).get("source_file", ""):
-                continue
-            meta_tags = {"documentation", "infrastructure", "persona", "readme", "test", "quality", "configuration"}
-            if meta_tags & tags:
-                continue
-            # A passage that only mentions build/bridge/growth in passing is a
-            # chronicle of work done, not a seed of work to do. Require an
-            # action signal unless explicitly tagged for the next session.
-            if "next-session" not in tags and "seed" not in tags:
-                if not any(sig in lower for sig in ACTION_SIGNALS):
-                    continue
-            # Completion chronicles are records, not unresolved items — but a
-            # passage that is itself tagged next-session still counts.
-            if COMPLETION_TAGS & tags and "next-session" not in tags and "seed" not in tags:
+            if not _is_unresolved(r, resolved):
                 continue
             items.append({
-                "id": pid[:8],
-                "tags": sorted(tags),
-                "snippet": text[:200],
+                "id": r.get("id", "")[:8],
+                "tags": sorted(r.get("tags", [])),
+                "snippet": r.get("text", "")[:200],
             })
         return {"count": len(items), "items": items}
     except Exception as e:
