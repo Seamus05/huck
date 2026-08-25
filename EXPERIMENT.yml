@@ -1,0 +1,24 @@
+name: "Huck — Isolated-Agent Pattern"
+description: "Proving agent for the isolated-agent pattern (A → B → C). Born in a VM, discovers its environment, chronicles what it learns. Part of Seamus05/Lab#1 Track B."
+author: "theyokel"
+created: "2026-08-18"
+status: "active"
+
+expected_horizon: "ongoing"
+
+directories:
+  in_use: ["notebooks", "config", "chronicles", "prompts", "state"]
+  omitted_by_design: ["data", "training", "results"]
+
+products: []
+
+linked_sources:
+  - path: "~/seafile-mount/gold-archive/provenance/"
+    maps_to: "state/"
+    reason: "Shared Mnemosyne memory is the archival substrate; Huck reads/writes via ds.py over 10.70.0.10:8381"
+
+tracking:
+  repo: "Seamus05/huck"
+  tracker_issue: "Seamus05/Lab#1 (Prove the Isolated-Agent Pattern A → B → C)"
+  vm: "huck.qcow2 on nvme0n1, mounted at /mnt/huck"
+  note: "Huck is a nested self-tracking repo under the Lab umbrella, per the sibling convention. His VM (nvme0n1) is his home; the host timer is the outer watchdog."
