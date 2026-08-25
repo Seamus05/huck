@@ -13,7 +13,7 @@ EXIT=$?
 if [ $EXIT -eq 1 ]; then
     # Drift or unresolved items found — wake Huck, but only if not already awake
     nohup flock -n /tmp/huck-wake.lock -c \
-        "/home/theyokel/.opencode/bin/opencode run --agent huck --model qwen35-local/qwen3.5 \
+        "/home/theyokel/.opencode/bin/opencode run --agent huck \
             \"check.py found drift or unresolved items. Read state/check.json, query Mnemosyne for context, and address what you find. Chronicle when done.\"" \
         >> /tmp/huck-wake.log 2>&1 &
     disown

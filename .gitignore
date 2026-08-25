@@ -12,3 +12,7 @@ __pycache__/
 !.opencode/tools/
 !.opencode/tools/**
 !.opencode/opencode.json
+
+# runtime symlinks + secrets
+huck-vm
+*.env
