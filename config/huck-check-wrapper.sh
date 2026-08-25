@@ -6,7 +6,7 @@
 # again 5 minutes later while a Huck is still working, the spawn is skipped
 # instead of piling up processes.
 
-cd /home/theyokel/huck
+cd /home/theyokel/lab/huck
 python3 notebooks/check.py
 EXIT=$?
 

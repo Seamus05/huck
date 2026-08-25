@@ -3,8 +3,8 @@ Description=Huck drift check — runs test suite, checks README tree, queries fo
 
 [Service]
 Type=oneshot
-ExecStart=/home/theyokel/huck/config/huck-check-wrapper.sh
-WorkingDirectory=/home/theyokel/huck
+ExecStart=/home/theyokel/lab/huck/config/huck-check-wrapper.sh
+WorkingDirectory=/home/theyokel/lab/huck
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=huck-check
